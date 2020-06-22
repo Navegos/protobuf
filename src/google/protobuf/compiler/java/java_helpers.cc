@@ -75,8 +75,8 @@ const char* kForbiddenWordList[] = {
     "class",
 };
 
-const std::unordered_set<string>* kReservedNames =
-    new std::unordered_set<string>({
+const std::unordered_set<std::string>* kReservedNames =
+    new std::unordered_set<std::string>({
         "abstract",   "assert",       "boolean",   "break",      "byte",
         "case",       "catch",        "char",      "class",      "const",
         "continue",   "default",      "do",        "double",     "else",
@@ -308,7 +308,7 @@ std::string ExtraMessageOrBuilderInterfaces(const Descriptor* descriptor) {
 
 std::string FieldConstantName(const FieldDescriptor* field) {
   std::string name = field->name() + "_FIELD_NUMBER";
-  UpperString(&name);
+  ToUpper(&name);
   return name;
 }
 
@@ -427,6 +427,7 @@ const char* BoxedPrimitiveTypeName(JavaType type) {
 const char* BoxedPrimitiveTypeName(const FieldDescriptor* descriptor) {
   return BoxedPrimitiveTypeName(GetJavaType(descriptor));
 }
+
 
 std::string GetOneofStoredType(const FieldDescriptor* field) {
   const JavaType javaType = GetJavaType(field);

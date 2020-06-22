@@ -103,6 +103,28 @@ namespace {
 
 bool IsMapFieldInApi(const FieldDescriptor* field) { return field->is_map(); }
 
+// Sync with helpers.h.
+inline bool HasHasbit(const FieldDescriptor* field) {
+  // This predicate includes proto3 message fields only if they have "optional".
+  //   Foo submsg1 = 1;           // HasHasbit() == false
+  //   optional Foo submsg2 = 2;  // HasHasbit() == true
+  // This is slightly odd, as adding "optional" to a singular proto3 field does
+  // not change the semantics or API. However whenever any field in a message
+  // has a hasbit, it forces reflection to include hasbit offsets for *all*
+  // fields, even if almost all of them are set to -1 (no hasbit). So to avoid
+  // causing a sudden size regression for ~all proto3 messages, we give proto3
+  // message fields a hasbit only if "optional" is present. If the user is
+  // explicitly writing "optional", it is likely they are writing it on
+  // primitive fields also.
+  return (field->has_optional_keyword() || field->is_required()) &&
+         !field->options().weak();
+}
+
+inline bool InRealOneof(const FieldDescriptor* field) {
+  return field->containing_oneof() &&
+         !field->containing_oneof()->is_synthetic();
+}
+
 // Compute the byte size of the in-memory representation of the field.
 int FieldSpaceUsed(const FieldDescriptor* field) {
   typedef FieldDescriptor FD;  // avoid line wrapping
@@ -314,26 +336,24 @@ class DynamicMessage : public Message {
   }
 
   const TypeInfo* type_info_;
-  Arena* const arena_;
   mutable std::atomic<int> cached_byte_size_;
   GOOGLE_DISALLOW_EVIL_CONSTRUCTORS(DynamicMessage);
 };
 
 DynamicMessage::DynamicMessage(const TypeInfo* type_info)
-    : type_info_(type_info), arena_(NULL), cached_byte_size_(0) {
+    : type_info_(type_info), cached_byte_size_(0) {
   SharedCtor(true);
 }
 
 DynamicMessage::DynamicMessage(const TypeInfo* type_info, Arena* arena)
     : Message(arena),
       type_info_(type_info),
-      arena_(arena),
       cached_byte_size_(0) {
   SharedCtor(true);
 }
 
 DynamicMessage::DynamicMessage(TypeInfo* type_info, bool lock_factory)
-    : type_info_(type_info), arena_(NULL), cached_byte_size_(0) {
+    : type_info_(type_info), cached_byte_size_(0) {
   // The prototype in type_info has to be set before creating the prototype
   // instance on memory. e.g., message Foo { map<int32, Foo> a = 1; }. When
   // creating prototype for Foo, prototype of the map entry will also be
@@ -356,18 +376,21 @@ void DynamicMessage::SharedCtor(bool lock_factory) {
 
   const Descriptor* descriptor = type_info_->type;
   // Initialize oneof cases.
+  int oneof_count = 0;
   for (int i = 0; i < descriptor->oneof_decl_count(); ++i) {
-    new (OffsetToPointer(type_info_->oneof_case_offset + sizeof(uint32) * i))
-        uint32(0);
+    if (descriptor->oneof_decl(i)->is_synthetic()) continue;
+    new (OffsetToPointer(type_info_->oneof_case_offset +
+                         sizeof(uint32) * oneof_count++)) uint32(0);
   }
 
   if (type_info_->extensions_offset != -1) {
-    new (OffsetToPointer(type_info_->extensions_offset)) ExtensionSet(arena_);
+    new (OffsetToPointer(type_info_->extensions_offset))
+        ExtensionSet(GetArena());
   }
   for (int i = 0; i < descriptor->field_count(); i++) {
     const FieldDescriptor* field = descriptor->field(i);
     void* field_ptr = OffsetToPointer(type_info_->offsets[i]);
-    if (field->containing_oneof()) {
+    if (InRealOneof(field)) {
       continue;
     }
     switch (field->cpp_type()) {
@@ -376,7 +399,7 @@ void DynamicMessage::SharedCtor(bool lock_factory) {
     if (!field->is_repeated()) {                           \
       new (field_ptr) TYPE(field->default_value_##TYPE()); \
     } else {                                               \
-      new (field_ptr) RepeatedField<TYPE>(arena_);         \
+      new (field_ptr) RepeatedField<TYPE>(GetArena());     \
     }                                                      \
     break;
 
@@ -393,7 +416,7 @@ void DynamicMessage::SharedCtor(bool lock_factory) {
         if (!field->is_repeated()) {
           new (field_ptr) int(field->default_value_enum()->number());
         } else {
-          new (field_ptr) RepeatedField<int>(arena_);
+          new (field_ptr) RepeatedField<int>(GetArena());
         }
         break;
 
@@ -414,7 +437,7 @@ void DynamicMessage::SharedCtor(bool lock_factory) {
               ArenaStringPtr* asp = new (field_ptr) ArenaStringPtr();
               asp->UnsafeSetDefault(default_value);
             } else {
-              new (field_ptr) RepeatedPtrField<std::string>(arena_);
+              new (field_ptr) RepeatedPtrField<std::string>(GetArena());
             }
             break;
         }
@@ -429,20 +452,20 @@ void DynamicMessage::SharedCtor(bool lock_factory) {
             // when the constructor is called inside GetPrototype(), in which
             // case we have already locked the factory.
             if (lock_factory) {
-              if (arena_ != NULL) {
+              if (GetArena() != nullptr) {
                 new (field_ptr) DynamicMapField(
                     type_info_->factory->GetPrototype(field->message_type()),
-                    arena_);
+                    GetArena());
               } else {
                 new (field_ptr) DynamicMapField(
                     type_info_->factory->GetPrototype(field->message_type()));
               }
             } else {
-              if (arena_ != NULL) {
+              if (GetArena() != nullptr) {
                 new (field_ptr)
                     DynamicMapField(type_info_->factory->GetPrototypeNoLock(
                                         field->message_type()),
-                                    arena_);
+                                    GetArena());
               } else {
                 new (field_ptr)
                     DynamicMapField(type_info_->factory->GetPrototypeNoLock(
@@ -450,7 +473,7 @@ void DynamicMessage::SharedCtor(bool lock_factory) {
               }
             }
           } else {
-            new (field_ptr) RepeatedPtrField<Message>(arena_);
+            new (field_ptr) RepeatedPtrField<Message>(GetArena());
           }
         }
         break;
@@ -480,7 +503,7 @@ DynamicMessage::~DynamicMessage() {
   // be touched.
   for (int i = 0; i < descriptor->field_count(); i++) {
     const FieldDescriptor* field = descriptor->field(i);
-    if (field->containing_oneof()) {
+    if (InRealOneof(field)) {
       void* field_ptr =
           OffsetToPointer(type_info_->oneof_case_offset +
                           sizeof(uint32) * field->containing_oneof()->index());
@@ -684,9 +707,15 @@ const Message* DynamicMessageFactory::GetPrototypeNoLock(
   //   this block.
   // - A big bitfield containing a bit for each field indicating whether
   //   or not that field is set.
+  int real_oneof_count = 0;
+  for (int i = 0; i < type->oneof_decl_count(); i++) {
+    if (!type->oneof_decl(i)->is_synthetic()) {
+      real_oneof_count++;
+    }
+  }
 
   // Compute size and offsets.
-  uint32* offsets = new uint32[type->field_count() + type->oneof_decl_count()];
+  uint32* offsets = new uint32[type->field_count() + real_oneof_count];
   type_info->offsets.reset(offsets);
 
   // Decide all field offsets by packing in order.
@@ -696,26 +725,35 @@ const Message* DynamicMessageFactory::GetPrototypeNoLock(
   size = AlignOffset(size);
 
   // Next the has_bits, which is an array of uint32s.
-  if (type->file()->syntax() == FileDescriptor::SYNTAX_PROTO3) {
-    type_info->has_bits_offset = -1;
-  } else {
-    type_info->has_bits_offset = size;
-    int has_bits_array_size =
-        DivideRoundingUp(type->field_count(), bitsizeof(uint32));
+  type_info->has_bits_offset = -1;
+  int max_hasbit = 0;
+  for (int i = 0; i < type->field_count(); i++) {
+    if (HasHasbit(type->field(i))) {
+      if (type_info->has_bits_offset == -1) {
+        // At least one field in the message requires a hasbit, so allocate
+        // hasbits.
+        type_info->has_bits_offset = size;
+        uint32* has_bits_indices = new uint32[type->field_count()];
+        for (int i = 0; i < type->field_count(); i++) {
+          // Initialize to -1, fields that need a hasbit will overwrite.
+          has_bits_indices[i] = static_cast<uint32>(-1);
+        }
+        type_info->has_bits_indices.reset(has_bits_indices);
+      }
+      type_info->has_bits_indices[i] = max_hasbit++;
+    }
+  }
+
+  if (max_hasbit > 0) {
+    int has_bits_array_size = DivideRoundingUp(max_hasbit, bitsizeof(uint32));
     size += has_bits_array_size * sizeof(uint32);
     size = AlignOffset(size);
-
-    uint32* has_bits_indices = new uint32[type->field_count()];
-    for (int i = 0; i < type->field_count(); i++) {
-      has_bits_indices[i] = i;
-    }
-    type_info->has_bits_indices.reset(has_bits_indices);
   }
 
   // The oneof_case, if any. It is an array of uint32s.
-  if (type->oneof_decl_count() > 0) {
+  if (real_oneof_count > 0) {
     type_info->oneof_case_offset = size;
-    size += type->oneof_decl_count() * sizeof(uint32);
+    size += real_oneof_count * sizeof(uint32);
     size = AlignOffset(size);
   }
 
@@ -736,7 +774,7 @@ const Message* DynamicMessageFactory::GetPrototypeNoLock(
   for (int i = 0; i < type->field_count(); i++) {
     // Make sure field is aligned to avoid bus errors.
     // Oneof fields do not use any space.
-    if (!type->field(i)->containing_oneof()) {
+    if (!InRealOneof(type->field(i))) {
       int field_size = FieldSpaceUsed(type->field(i));
       size = AlignTo(size, std::min(kSafeAlignment, field_size));
       offsets[i] = size;
@@ -746,9 +784,11 @@ const Message* DynamicMessageFactory::GetPrototypeNoLock(
 
   // The oneofs.
   for (int i = 0; i < type->oneof_decl_count(); i++) {
-    size = AlignTo(size, kSafeAlignment);
-    offsets[type->field_count() + i] = size;
-    size += kMaxOneofUnionSize;
+    if (!type->oneof_decl(i)->is_synthetic()) {
+      size = AlignTo(size, kSafeAlignment);
+      offsets[type->field_count() + i] = size;
+      size += kMaxOneofUnionSize;
+    }
   }
 
   type_info->weak_field_map_offset = -1;
@@ -759,17 +799,16 @@ const Message* DynamicMessageFactory::GetPrototypeNoLock(
 
   // Construct the reflection object.
 
-  if (type->oneof_decl_count() > 0) {
-    // Compute the size of default oneof instance and offsets of default
-    // oneof fields.
-    for (int i = 0; i < type->oneof_decl_count(); i++) {
-      for (int j = 0; j < type->oneof_decl(i)->field_count(); j++) {
-        const FieldDescriptor* field = type->oneof_decl(i)->field(j);
-        int field_size = OneofFieldSpaceUsed(field);
-        size = AlignTo(size, std::min(kSafeAlignment, field_size));
-        offsets[field->index()] = size;
-        size += field_size;
-      }
+  // Compute the size of default oneof instance and offsets of default
+  // oneof fields.
+  for (int i = 0; i < type->oneof_decl_count(); i++) {
+    if (type->oneof_decl(i)->is_synthetic()) continue;
+    for (int j = 0; j < type->oneof_decl(i)->field_count(); j++) {
+      const FieldDescriptor* field = type->oneof_decl(i)->field(j);
+      int field_size = OneofFieldSpaceUsed(field);
+      size = AlignTo(size, std::min(kSafeAlignment, field_size));
+      offsets[field->index()] = size;
+      size += field_size;
     }
   }
   size = AlignOffset(size);
@@ -781,7 +820,7 @@ const Message* DynamicMessageFactory::GetPrototypeNoLock(
   // of dynamic message to avoid dead lock.
   DynamicMessage* prototype = new (base) DynamicMessage(type_info, false);
 
-  if (type->oneof_decl_count() > 0 || num_weak_fields > 0) {
+  if (real_oneof_count > 0 || num_weak_fields > 0) {
     // Construct default oneof instance.
     ConstructDefaultOneofInstance(type_info->type, type_info->offsets.get(),
                                   prototype);
@@ -811,6 +850,7 @@ void DynamicMessageFactory::ConstructDefaultOneofInstance(
     const Descriptor* type, const uint32 offsets[],
     void* default_oneof_or_weak_instance) {
   for (int i = 0; i < type->oneof_decl_count(); i++) {
+    if (type->oneof_decl(i)->is_synthetic()) continue;
     for (int j = 0; j < type->oneof_decl(i)->field_count(); j++) {
       const FieldDescriptor* field = type->oneof_decl(i)->field(j);
       void* field_ptr =
@@ -857,6 +897,7 @@ void DynamicMessageFactory::DeleteDefaultOneofInstance(
     const Descriptor* type, const uint32 offsets[],
     const void* default_oneof_instance) {
   for (int i = 0; i < type->oneof_decl_count(); i++) {
+    if (type->oneof_decl(i)->is_synthetic()) continue;
     for (int j = 0; j < type->oneof_decl(i)->field_count(); j++) {
       const FieldDescriptor* field = type->oneof_decl(i)->field(j);
       if (field->cpp_type() == FieldDescriptor::CPPTYPE_STRING) {

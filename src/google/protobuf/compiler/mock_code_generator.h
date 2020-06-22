@@ -106,11 +106,10 @@ class MockCodeGenerator : public CodeGenerator {
 
   // implements CodeGenerator ----------------------------------------
 
-  virtual bool Generate(const FileDescriptor* file,
-                        const std::string& parameter, GeneratorContext* context,
-                        std::string* error) const;
+  bool Generate(const FileDescriptor* file, const std::string& parameter,
+                GeneratorContext* context, std::string* error) const override;
 
-  uint64 GetSupportedFeatures() const override;
+  uint64_t GetSupportedFeatures() const override;
   void SuppressFeatures(uint64 features);
 
  private:

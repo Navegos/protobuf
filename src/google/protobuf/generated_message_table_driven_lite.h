@@ -31,10 +31,9 @@
 #ifndef GOOGLE_PROTOBUF_GENERATED_MESSAGE_TABLE_DRIVEN_LITE_H__
 #define GOOGLE_PROTOBUF_GENERATED_MESSAGE_TABLE_DRIVEN_LITE_H__
 
-#include <google/protobuf/generated_message_table_driven.h>
-
 #include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 #include <google/protobuf/extension_set.h>
+#include <google/protobuf/generated_message_table_driven.h>
 #include <google/protobuf/implicit_weak_message.h>
 #include <google/protobuf/inlined_string_field.h>
 #include <google/protobuf/repeated_field.h>
@@ -280,9 +279,13 @@ static inline bool HandleString(io::CodedInputStream* input, MessageLite* msg,
           }
           utf8_string_data = field->Get();
         } break;
+        default:
+          PROTOBUF_ASSUME(false);
       }
       break;
     }
+    default:
+      PROTOBUF_ASSUME(false);
   }
 
   if (kValidateUtf8) {
@@ -306,7 +309,7 @@ inline bool HandleEnum(const ParseTable& table, io::CodedInputStream* input,
     return false;
   }
 
-  AuxillaryParseTableField::EnumValidator validator =
+  AuxiliaryParseTableField::EnumValidator validator =
       table.aux[field_number].enums.validator;
   if (validator == nullptr || validator(value)) {
     switch (cardinality) {
@@ -322,6 +325,8 @@ inline bool HandleEnum(const ParseTable& table, io::CodedInputStream* input,
         SetOneofField(msg, presence, presence_index, offset, field_number,
                       value);
         break;
+      default:
+        PROTOBUF_ASSUME(false);
     }
   } else {
     UnknownFieldHandler::Varint(msg, table, tag, value);
@@ -406,9 +411,6 @@ bool MergePartialFromCodedStreamInlined(MessageLite* msg,
     const unsigned char processing_type = data->processing_type;
 
     if (data->normal_wiretype == static_cast<unsigned char>(wire_type)) {
-      // TODO(ckennelly): Use a computed goto on GCC/LLVM or otherwise eliminate
-      // the bounds check on processing_type.
-
       switch (processing_type) {
 #define HANDLE_TYPE(TYPE, CPPTYPE)                                             \
   case (WireFormatLite::TYPE_##TYPE): {                                        \
@@ -739,7 +741,7 @@ bool MergePartialFromCodedStreamInlined(MessageLite* msg,
           return true;
         }
         default:
-          break;
+          PROTOBUF_ASSUME(false);
       }
     } else if (data->packed_wiretype == static_cast<unsigned char>(wire_type)) {
       // Non-packable fields have their packed_wiretype masked with
@@ -751,8 +753,6 @@ bool MergePartialFromCodedStreamInlined(MessageLite* msg,
       GOOGLE_DCHECK_NE(TYPE_BYTES_INLINED | kRepeatedMask, processing_type);
       GOOGLE_DCHECK_NE(TYPE_STRING_INLINED | kRepeatedMask, processing_type);
 
-      // TODO(ckennelly): Use a computed goto on GCC/LLVM.
-      //
       // Mask out kRepeatedMask bit, allowing the jump table to be smaller.
       switch (static_cast<WireFormatLite::FieldType>(processing_type ^
                                                      kRepeatedMask)) {
@@ -794,7 +794,7 @@ bool MergePartialFromCodedStreamInlined(MessageLite* msg,
             return false;
           }
 
-          AuxillaryParseTableField::EnumValidator validator =
+          AuxiliaryParseTableField::EnumValidator validator =
               table.aux[field_number].enums.validator;
           RepeatedField<int>* values = Raw<RepeatedField<int>>(msg, offset);
 
@@ -825,7 +825,7 @@ bool MergePartialFromCodedStreamInlined(MessageLite* msg,
           GOOGLE_DCHECK(false);
           return false;
         default:
-          break;
+          PROTOBUF_ASSUME(false);
       }
     } else {
       if (wire_type == WireFormatLite::WIRETYPE_END_GROUP) {

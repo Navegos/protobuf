@@ -50,6 +50,7 @@
 #include <google/protobuf/repeated_field.h>
 #include <google/protobuf/unknown_field_set.h>
 #include <google/protobuf/wire_format.h>
+#include <google/protobuf/stubs/strutil.h>
 
 
 #include <google/protobuf/port_def.inc>
@@ -81,7 +82,7 @@ bool IsMapFieldInApi(const FieldDescriptor* field) { return field->is_map(); }
 
 namespace internal {
 
-bool ParseNamedEnum(const EnumDescriptor* descriptor, const std::string& name,
+bool ParseNamedEnum(const EnumDescriptor* descriptor, ConstStringParam name,
                     int* value) {
   const EnumValueDescriptor* d = descriptor->FindValueByName(name);
   if (d == nullptr) return false;
@@ -169,6 +170,12 @@ static void ReportReflectionUsageEnumTypeError(
              << "\n"
                 "    Actual    : "
              << value->full_name();
+}
+
+inline void CheckInvalidAccess(const internal::ReflectionSchema& schema,
+                               const FieldDescriptor* field) {
+  GOOGLE_CHECK(!schema.IsFieldStripped(field))
+      << "invalid access to a stripped field " << field->full_name();
 }
 
 #define USAGE_CHECK(CONDITION, METHOD, ERROR_DESCRIPTION) \
@@ -287,7 +294,7 @@ size_t Reflection::SpaceUsedLong(const Message& message) const {
           break;
       }
     } else {
-      if (field->containing_oneof() && !HasOneofField(message, field)) {
+      if (schema_.InRealOneof(field) && !HasOneofField(message, field)) {
         continue;
       }
       switch (field->cpp_type()) {
@@ -352,6 +359,8 @@ size_t Reflection::SpaceUsedLong(const Message& message) const {
 
 void Reflection::SwapField(Message* message1, Message* message2,
                            const FieldDescriptor* field) const {
+  CheckInvalidAccess(schema_, field);
+
   if (field->is_repeated()) {
     switch (field->cpp_type()) {
 #define SWAP_ARRAYS(CPPTYPE, TYPE)                                 \
@@ -476,6 +485,7 @@ void Reflection::SwapField(Message* message1, Message* message2,
 
 void Reflection::SwapOneofField(Message* message1, Message* message2,
                                 const OneofDescriptor* oneof_descriptor) const {
+  GOOGLE_DCHECK(!oneof_descriptor->is_synthetic());
   uint32 oneof_case1 = GetOneofCase(*message1, oneof_descriptor);
   uint32 oneof_case2 = GetOneofCase(*message2, oneof_descriptor);
 
@@ -632,7 +642,7 @@ void Reflection::Swap(Message* message1, Message* message2) const {
     int fields_with_has_bits = 0;
     for (int i = 0; i < descriptor_->field_count(); i++) {
       const FieldDescriptor* field = descriptor_->field(i);
-      if (field->is_repeated() || field->containing_oneof()) {
+      if (field->is_repeated() || schema_.InRealOneof(field)) {
         continue;
       }
       fields_with_has_bits++;
@@ -647,12 +657,16 @@ void Reflection::Swap(Message* message1, Message* message2) const {
 
   for (int i = 0; i <= last_non_weak_field_index_; i++) {
     const FieldDescriptor* field = descriptor_->field(i);
-    if (field->containing_oneof()) continue;
+    if (schema_.InRealOneof(field)) continue;
+    if (schema_.IsFieldStripped(field)) continue;
     SwapField(message1, message2, field);
   }
   const int oneof_decl_count = descriptor_->oneof_decl_count();
   for (int i = 0; i < oneof_decl_count; i++) {
-    SwapOneofField(message1, message2, descriptor_->oneof_decl(i));
+    const OneofDescriptor* oneof = descriptor_->oneof_decl(i);
+    if (!oneof->is_synthetic()) {
+      SwapOneofField(message1, message2, oneof);
+    }
   }
 
   if (schema_.HasExtensionSet()) {
@@ -690,11 +704,12 @@ void Reflection::SwapFields(
   const int fields_size = static_cast<int>(fields.size());
   for (int i = 0; i < fields_size; i++) {
     const FieldDescriptor* field = fields[i];
+    CheckInvalidAccess(schema_, field);
     if (field->is_extension()) {
       MutableExtensionSet(message1)->SwapExtension(
           MutableExtensionSet(message2), field->number());
     } else {
-      if (field->containing_oneof()) {
+      if (schema_.InRealOneof(field)) {
         int oneof_index = field->containing_oneof()->index();
         // Only swap the oneof field once.
         if (swapped_oneof.find(oneof_index) != swapped_oneof.end()) {
@@ -721,11 +736,12 @@ bool Reflection::HasField(const Message& message,
                           const FieldDescriptor* field) const {
   USAGE_CHECK_MESSAGE_TYPE(HasField);
   USAGE_CHECK_SINGULAR(HasField);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     return GetExtensionSet(message).Has(field->number());
   } else {
-    if (field->containing_oneof()) {
+    if (schema_.InRealOneof(field)) {
       return HasOneofField(message, field);
     } else {
       return HasBit(message, field);
@@ -737,6 +753,7 @@ int Reflection::FieldSize(const Message& message,
                           const FieldDescriptor* field) const {
   USAGE_CHECK_MESSAGE_TYPE(FieldSize);
   USAGE_CHECK_REPEATED(FieldSize);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     return GetExtensionSet(message).ExtensionSize(field->number());
@@ -781,11 +798,12 @@ int Reflection::FieldSize(const Message& message,
 void Reflection::ClearField(Message* message,
                             const FieldDescriptor* field) const {
   USAGE_CHECK_MESSAGE_TYPE(ClearField);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     MutableExtensionSet(message)->ClearExtension(field->number());
   } else if (!field->is_repeated()) {
-    if (field->containing_oneof()) {
+    if (schema_.InRealOneof(field)) {
       ClearOneofField(message, field);
       return;
     }
@@ -895,6 +913,7 @@ void Reflection::RemoveLast(Message* message,
                             const FieldDescriptor* field) const {
   USAGE_CHECK_MESSAGE_TYPE(RemoveLast);
   USAGE_CHECK_REPEATED(RemoveLast);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     MutableExtensionSet(message)->RemoveLast(field->number());
@@ -942,6 +961,7 @@ void Reflection::RemoveLast(Message* message,
 Message* Reflection::ReleaseLast(Message* message,
                                  const FieldDescriptor* field) const {
   USAGE_CHECK_ALL(ReleaseLast, REPEATED, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     return static_cast<Message*>(
@@ -962,6 +982,7 @@ void Reflection::SwapElements(Message* message, const FieldDescriptor* field,
                               int index1, int index2) const {
   USAGE_CHECK_MESSAGE_TYPE(Swap);
   USAGE_CHECK_REPEATED(Swap);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     MutableExtensionSet(message)->SwapElements(field->number(), index1, index2);
@@ -1026,8 +1047,9 @@ bool CreateUnknownEnumValues(const FieldDescriptor* field) {
 }  // namespace internal
 using internal::CreateUnknownEnumValues;
 
-void Reflection::ListFields(const Message& message,
-                            std::vector<const FieldDescriptor*>* output) const {
+void Reflection::ListFieldsMayFailOnStripped(
+    const Message& message, bool should_fail,
+    std::vector<const FieldDescriptor*>* output) const {
   output->clear();
 
   // Optimization:  The default instance never has any fields set.
@@ -1044,20 +1066,23 @@ void Reflection::ListFields(const Message& message,
   output->reserve(descriptor_->field_count());
   for (int i = 0; i <= last_non_weak_field_index_; i++) {
     const FieldDescriptor* field = descriptor_->field(i);
+    if (!should_fail && schema_.IsFieldStripped(field)) {
+      continue;
+    }
     if (field->is_repeated()) {
       if (FieldSize(message, field) > 0) {
         output->push_back(field);
       }
     } else {
       const OneofDescriptor* containing_oneof = field->containing_oneof();
-      if (containing_oneof) {
+      if (schema_.InRealOneof(field)) {
         const uint32* const oneof_case_array = GetConstPointerAtOffset<uint32>(
             &message, schema_.oneof_case_offset_);
         // Equivalent to: HasOneofField(message, field)
         if (oneof_case_array[containing_oneof->index()] == field->number()) {
           output->push_back(field);
         }
-      } else if (has_bits) {
+      } else if (has_bits && has_bits_indices[i] != -1) {
         // Equivalent to: HasBit(message, field)
         if (IsIndexInHasBitSet(has_bits, has_bits_indices[i])) {
           output->push_back(field);
@@ -1074,6 +1099,16 @@ void Reflection::ListFields(const Message& message,
 
   // ListFields() must sort output by field number.
   std::sort(output->begin(), output->end(), FieldNumberSorter());
+}
+
+void Reflection::ListFields(const Message& message,
+                            std::vector<const FieldDescriptor*>* output) const {
+  ListFieldsMayFailOnStripped(message, true, output);
+}
+
+void Reflection::ListFieldsOmitStripped(
+    const Message& message, std::vector<const FieldDescriptor*>* output) const {
+  ListFieldsMayFailOnStripped(message, false, output);
 }
 
 // -------------------------------------------------------------------
@@ -1208,7 +1243,7 @@ void Reflection::SetString(Message* message, const FieldDescriptor* field,
 
         const std::string* default_ptr =
             &DefaultRaw<ArenaStringPtr>(field).Get();
-        if (field->containing_oneof() && !HasOneofField(*message, field)) {
+        if (schema_.InRealOneof(field) && !HasOneofField(*message, field)) {
           ClearOneof(message, field->containing_oneof());
           MutableField<ArenaStringPtr>(message, field)
               ->UnsafeSetDefault(default_ptr);
@@ -1445,6 +1480,7 @@ const Message& Reflection::GetMessage(const Message& message,
                                       const FieldDescriptor* field,
                                       MessageFactory* factory) const {
   USAGE_CHECK_ALL(GetMessage, SINGULAR, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
   if (factory == nullptr) factory = message_factory_;
 
@@ -1464,6 +1500,7 @@ Message* Reflection::MutableMessage(Message* message,
                                     const FieldDescriptor* field,
                                     MessageFactory* factory) const {
   USAGE_CHECK_ALL(MutableMessage, SINGULAR, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
   if (factory == nullptr) factory = message_factory_;
 
@@ -1475,7 +1512,7 @@ Message* Reflection::MutableMessage(Message* message,
 
     Message** result_holder = MutableRaw<Message*>(message, field);
 
-    if (field->containing_oneof()) {
+    if (schema_.InRealOneof(field)) {
       if (!HasOneofField(*message, field)) {
         ClearOneof(message, field->containing_oneof());
         result_holder = MutableField<Message*>(message, field);
@@ -1499,12 +1536,13 @@ void Reflection::UnsafeArenaSetAllocatedMessage(
     Message* message, Message* sub_message,
     const FieldDescriptor* field) const {
   USAGE_CHECK_ALL(SetAllocatedMessage, SINGULAR, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     MutableExtensionSet(message)->UnsafeArenaSetAllocatedMessage(
         field->number(), field->type(), field, sub_message);
   } else {
-    if (field->containing_oneof()) {
+    if (schema_.InRealOneof(field)) {
       if (sub_message == nullptr) {
         ClearOneof(message, field->containing_oneof());
         return;
@@ -1530,6 +1568,8 @@ void Reflection::UnsafeArenaSetAllocatedMessage(
 
 void Reflection::SetAllocatedMessage(Message* message, Message* sub_message,
                                      const FieldDescriptor* field) const {
+  CheckInvalidAccess(schema_, field);
+
   // If message and sub-message are in different memory ownership domains
   // (different arenas, or one is on heap and one is not), then we may need to
   // do a copy.
@@ -1558,6 +1598,7 @@ Message* Reflection::UnsafeArenaReleaseMessage(Message* message,
                                                const FieldDescriptor* field,
                                                MessageFactory* factory) const {
   USAGE_CHECK_ALL(ReleaseMessage, SINGULAR, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
   if (factory == nullptr) factory = message_factory_;
 
@@ -1566,10 +1607,10 @@ Message* Reflection::UnsafeArenaReleaseMessage(Message* message,
         MutableExtensionSet(message)->UnsafeArenaReleaseMessage(field,
                                                                 factory));
   } else {
-    if (!(field->is_repeated() || field->containing_oneof())) {
+    if (!(field->is_repeated() || schema_.InRealOneof(field))) {
       ClearBit(message, field);
     }
-    if (field->containing_oneof()) {
+    if (schema_.InRealOneof(field)) {
       if (HasOneofField(*message, field)) {
         *MutableOneofCase(message, field->containing_oneof()) = 0;
       } else {
@@ -1586,6 +1627,8 @@ Message* Reflection::UnsafeArenaReleaseMessage(Message* message,
 Message* Reflection::ReleaseMessage(Message* message,
                                     const FieldDescriptor* field,
                                     MessageFactory* factory) const {
+  CheckInvalidAccess(schema_, field);
+
   Message* released = UnsafeArenaReleaseMessage(message, field, factory);
   if (GetArena(message) != nullptr && released != nullptr) {
     Message* copy_from_arena = released->New();
@@ -1599,6 +1642,7 @@ const Message& Reflection::GetRepeatedMessage(const Message& message,
                                               const FieldDescriptor* field,
                                               int index) const {
   USAGE_CHECK_ALL(GetRepeatedMessage, REPEATED, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     return static_cast<const Message&>(
@@ -1619,6 +1663,7 @@ Message* Reflection::MutableRepeatedMessage(Message* message,
                                             const FieldDescriptor* field,
                                             int index) const {
   USAGE_CHECK_ALL(MutableRepeatedMessage, REPEATED, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     return static_cast<Message*>(
@@ -1639,6 +1684,7 @@ Message* Reflection::MutableRepeatedMessage(Message* message,
 Message* Reflection::AddMessage(Message* message, const FieldDescriptor* field,
                                 MessageFactory* factory) const {
   USAGE_CHECK_ALL(AddMessage, REPEATED, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
   if (factory == nullptr) factory = message_factory_;
 
@@ -1681,6 +1727,7 @@ void Reflection::AddAllocatedMessage(Message* message,
                                      const FieldDescriptor* field,
                                      Message* new_entry) const {
   USAGE_CHECK_ALL(AddAllocatedMessage, REPEATED, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     MutableExtensionSet(message)->AddAllocatedMessage(field, new_entry);
@@ -1702,6 +1749,8 @@ void* Reflection::MutableRawRepeatedField(Message* message,
                                           int ctype,
                                           const Descriptor* desc) const {
   USAGE_CHECK_REPEATED("MutableRawRepeatedField");
+  CheckInvalidAccess(schema_, field);
+
   if (field->cpp_type() != cpptype &&
       (field->cpp_type() != FieldDescriptor::CPPTYPE_ENUM ||
        cpptype != FieldDescriptor::CPPTYPE_INT32))
@@ -1754,6 +1803,10 @@ const void* Reflection::GetRawRepeatedField(const Message& message,
 
 const FieldDescriptor* Reflection::GetOneofFieldDescriptor(
     const Message& message, const OneofDescriptor* oneof_descriptor) const {
+  if (oneof_descriptor->is_synthetic()) {
+    const FieldDescriptor* field = oneof_descriptor->field(0);
+    return HasField(message, field) ? field : nullptr;
+  }
   uint32 field_number = GetOneofCase(message, oneof_descriptor);
   if (field_number == 0) {
     return nullptr;
@@ -1850,7 +1903,7 @@ Type* Reflection::MutableRawNonOneof(Message* message,
 template <typename Type>
 const Type& Reflection::GetRaw(const Message& message,
                                const FieldDescriptor* field) const {
-  if (field->containing_oneof() && !HasOneofField(message, field)) {
+  if (schema_.InRealOneof(field) && !HasOneofField(message, field)) {
     return DefaultRaw<Type>(field);
   }
   return GetConstRefAtOffset<Type>(message, schema_.GetFieldOffset(field));
@@ -1878,12 +1931,14 @@ uint32* Reflection::MutableHasBits(Message* message) const {
 
 uint32 Reflection::GetOneofCase(const Message& message,
                                 const OneofDescriptor* oneof_descriptor) const {
+  GOOGLE_DCHECK(!oneof_descriptor->is_synthetic());
   return GetConstRefAtOffset<uint32>(
       message, schema_.GetOneofCaseOffset(oneof_descriptor));
 }
 
 uint32* Reflection::MutableOneofCase(
     Message* message, const OneofDescriptor* oneof_descriptor) const {
+  GOOGLE_DCHECK(!oneof_descriptor->is_synthetic());
   return GetPointerAtOffset<uint32>(
       message, schema_.GetOneofCaseOffset(oneof_descriptor));
 }
@@ -1917,9 +1972,12 @@ InternalMetadata* Reflection::MutableInternalMetadata(Message* message) const {
 bool Reflection::HasBit(const Message& message,
                         const FieldDescriptor* field) const {
   GOOGLE_DCHECK(!field->options().weak());
-  if (schema_.HasHasbits()) {
+  if (schema_.HasBitIndex(field) != -1) {
     return IsIndexInHasBitSet(GetHasBits(message), schema_.HasBitIndex(field));
   }
+
+  // Intentionally check here because HasBitIndex(field) != -1 means valid.
+  CheckInvalidAccess(schema_, field);
 
   // proto3: no has-bits. All fields present except messages, which are
   // present only if their message-field pointer is non-null.
@@ -1977,10 +2035,8 @@ bool Reflection::HasBit(const Message& message,
 
 void Reflection::SetBit(Message* message, const FieldDescriptor* field) const {
   GOOGLE_DCHECK(!field->options().weak());
-  if (!schema_.HasHasbits()) {
-    return;
-  }
   const uint32 index = schema_.HasBitIndex(field);
+  if (index == -1) return;
   MutableHasBits(message)[index / 32] |=
       (static_cast<uint32>(1) << (index % 32));
 }
@@ -2017,6 +2073,9 @@ void Reflection::SwapBit(Message* message1, Message* message2,
 
 bool Reflection::HasOneof(const Message& message,
                           const OneofDescriptor* oneof_descriptor) const {
+  if (oneof_descriptor->is_synthetic()) {
+    return HasField(message, oneof_descriptor->field(0));
+  }
   return (GetOneofCase(message, oneof_descriptor) > 0);
 }
 
@@ -2039,6 +2098,10 @@ void Reflection::ClearOneofField(Message* message,
 
 void Reflection::ClearOneof(Message* message,
                             const OneofDescriptor* oneof_descriptor) const {
+  if (oneof_descriptor->is_synthetic()) {
+    ClearField(message, oneof_descriptor->field(0));
+    return;
+  }
   // TODO(jieluo): Consider to cache the unused object instead of deleting
   // it. It will be much faster if an application switches a lot from
   // a few oneof fields.  Time/space tradeoff
@@ -2119,19 +2182,19 @@ const Type& Reflection::GetField(const Message& message,
 template <typename Type>
 void Reflection::SetField(Message* message, const FieldDescriptor* field,
                           const Type& value) const {
-  if (field->containing_oneof() && !HasOneofField(*message, field)) {
+  bool real_oneof = schema_.InRealOneof(field);
+  if (real_oneof && !HasOneofField(*message, field)) {
     ClearOneof(message, field->containing_oneof());
   }
   *MutableRaw<Type>(message, field) = value;
-  field->containing_oneof() ? SetOneofCase(message, field)
-                            : SetBit(message, field);
+  real_oneof ? SetOneofCase(message, field) : SetBit(message, field);
 }
 
 template <typename Type>
 Type* Reflection::MutableField(Message* message,
                                const FieldDescriptor* field) const {
-  field->containing_oneof() ? SetOneofCase(message, field)
-                            : SetBit(message, field);
+  schema_.InRealOneof(field) ? SetOneofCase(message, field)
+                             : SetBit(message, field);
   return MutableRaw<Type>(message, field);
 }
 

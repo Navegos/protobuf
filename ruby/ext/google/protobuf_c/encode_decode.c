@@ -434,10 +434,8 @@ static void *startmap_handler(void *closure, const void *hd) {
 }
 
 static bool endmap_handler(void *closure, const void *hd) {
-  MessageHeader* msg = closure;
-  const map_handlerdata_t* mapdata = hd;
-  VALUE map_rb = DEREF(msg, mapdata->ofs, VALUE);
-  Map_set_frame(map_rb, Qnil);
+  map_parse_frame_t* frame = closure;
+  Map_set_frame(frame->map, Qnil);
   return true;
 }
 
@@ -935,7 +933,7 @@ void add_handlers_for_message(const void *closure, upb_handlers *h) {
        !upb_msg_field_done(&i);
        upb_msg_field_next(&i)) {
     const upb_fielddef *f = upb_msg_iter_field(&i);
-    const upb_oneofdef *oneof = upb_fielddef_containingoneof(f);
+    const upb_oneofdef* oneof = upb_fielddef_realcontainingoneof(f);
     size_t offset = get_field_offset(desc->layout, f);
 
     if (oneof) {
@@ -1200,7 +1198,7 @@ static void putsubmsg(VALUE submsg, const upb_fielddef *f, upb_sink sink,
 
   upb_sink_startsubmsg(sink, getsel(f, UPB_HANDLER_STARTSUBMSG), &subsink);
   putmsg(submsg, subdesc, subsink, depth + 1, emit_defaults, is_json, true);
-  upb_sink_endsubmsg(sink, getsel(f, UPB_HANDLER_ENDSUBMSG));
+  upb_sink_endsubmsg(sink, subsink, getsel(f, UPB_HANDLER_ENDSUBMSG));
 }
 
 static void putary(VALUE ary, const upb_fielddef* f, upb_sink sink, int depth,
@@ -1345,7 +1343,7 @@ static void putmap(VALUE map, const upb_fielddef* f, upb_sink sink, int depth,
                    entry_sink, emit_defaults, is_json);
 
     upb_sink_endmsg(entry_sink, &status);
-    upb_sink_endsubmsg(subsink, getsel(f, UPB_HANDLER_ENDSUBMSG));
+    upb_sink_endsubmsg(subsink, entry_sink, getsel(f, UPB_HANDLER_ENDSUBMSG));
   }
 
   upb_sink_endseq(sink, getsel(f, UPB_HANDLER_ENDSEQ));
@@ -1508,7 +1506,7 @@ static void putmsg(VALUE msg_rb, const Descriptor* desc,
        !upb_msg_field_done(&i);
        upb_msg_field_next(&i)) {
     upb_fielddef *f = upb_msg_iter_field(&i);
-    const upb_oneofdef *oneof = upb_fielddef_containingoneof(f);
+    const upb_oneofdef* oneof = upb_fielddef_realcontainingoneof(f);
     bool is_matching_oneof = false;
     uint32_t offset =
         desc->layout->fields[upb_fielddef_index(f)].offset +
@@ -1716,7 +1714,7 @@ static void discard_unknown(VALUE msg_rb, const Descriptor* desc) {
        !upb_msg_field_done(&it);
        upb_msg_field_next(&it)) {
     upb_fielddef *f = upb_msg_iter_field(&it);
-    const upb_oneofdef *oneof = upb_fielddef_containingoneof(f);
+    const upb_oneofdef* oneof = upb_fielddef_realcontainingoneof(f);
     uint32_t offset =
         desc->layout->fields[upb_fielddef_index(f)].offset +
         sizeof(MessageHeader);
